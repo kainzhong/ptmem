@@ -330,6 +330,20 @@ def fmt_time(us: float) -> str:
     return f'{us:.0f}µs'
 
 
+def heat_pair(pct: float) -> int:
+    """Return curses color pair (5–9) for a fraction 0.0–1.0 of total memory."""
+    # 5 thresholds: <5% blue, <20% cyan, <40% green, <70% yellow, else red
+    if pct < 0.05:
+        return 5
+    if pct < 0.20:
+        return 6
+    if pct < 0.40:
+        return 7
+    if pct < 0.70:
+        return 8
+    return 9
+
+
 def safe_addstr(win, y, x, text, attr=0):
     """addstr that silently ignores out-of-bounds errors."""
     try:
@@ -357,6 +371,7 @@ class TimelineView:
         self.cursor = 0          # selected bucket index (absolute)
         self.view_start = 0      # leftmost visible bucket index (absolute)
         self.bucket_us = 1000    # microseconds per bucket column
+        self.y_bottom = 0        # bytes; bottom of visible y range (0 = full range)
         self._auto_fit_done = False
 
     def _auto_fit(self, n_cols: int):
@@ -428,6 +443,20 @@ class TimelineView:
             if self.cursor >= self.view_start + n_cols:
                 self.view_start = self.cursor - n_cols + 1
 
+        elif key == curses.KEY_UP:
+            y_top = self.data.max_memory or 1
+            y_range = max(1, y_top - self.y_bottom)
+            step = max(1, y_range // 10)
+            self.y_bottom = min(self.y_bottom + step, y_top - 1)
+
+        elif key == curses.KEY_DOWN:
+            y_range = max(1, (self.data.max_memory or 1) - self.y_bottom)
+            step = max(1, y_range // 10)
+            self.y_bottom = max(0, self.y_bottom - step)
+
+        elif key in (ord('r'), ord('R')):
+            self.y_bottom = 0
+
         elif key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
             return 'snapshot'
 
@@ -479,7 +508,9 @@ class TimelineView:
                 mem = self.data.get_bucket_max_memory(b_start, b_end)
                 buckets.append((b_start, b_end, mem, bidx))
 
-        scale_max = self.data.max_memory or 1
+        y_top = self.data.max_memory or 1
+        y_bottom = self.y_bottom
+        y_range = max(1, y_top - y_bottom)
 
         # Header
         cur_time = self.current_time_us()
@@ -491,9 +522,11 @@ class TimelineView:
                 f"Bucket: {fmt_time(self.bucket_us)}/col  |  "
                 f"Cursor: +{fmt_time(rel_time)}  |  "
                 f"Memory: {fmt_bytes(cur_mem)}")
+        y_range_s = (f"Y: {fmt_bytes(y_bottom)} – {fmt_bytes(y_top)}"
+                     if y_bottom > 0 else f"Peak: {fmt_bytes(self.data.max_memory)}")
         hdr2 = (f"Range: {fmt_time(self.data.min_time)} – {fmt_time(self.data.max_time)}  |  "
                 f"Span: {fmt_time(total_span)}  |  "
-                f"Peak: {fmt_bytes(self.data.max_memory)}")
+                f"{y_range_s}")
         safe_addstr(stdscr, 0, 0, hdr1[:width - 1], curses.A_BOLD)
         safe_addstr(stdscr, 1, 0, hdr2[:width - 1])
 
@@ -506,7 +539,7 @@ class TimelineView:
         tick_rows: set = set()
         for tick in range(N_TICKS):
             frac = tick / (N_TICKS - 1)
-            mem_val = int(scale_max * frac)
+            mem_val = int(y_bottom + frac * y_range)
             label = fmt_bytes(mem_val)
             chart_row = chart_rows - 1 - int(frac * (chart_rows - 1))
             tick_rows.add(chart_row)
@@ -519,7 +552,8 @@ class TimelineView:
         rel_cursor = self.cursor - self.view_start
 
         for col_i, (b_start, b_end, mem, bidx) in enumerate(buckets):
-            bar_frac = min(1.0, mem / scale_max) if scale_max > 0 else 0
+            # Clip bar to the visible y window [y_bottom, y_top]
+            bar_frac = min(1.0, max(0.0, (mem - y_bottom) / y_range)) if y_range > 0 else 0
             bar_h = round(bar_frac * chart_rows)
             is_cursor = (col_i == rel_cursor)
 
@@ -562,7 +596,7 @@ class TimelineView:
                     safe_addstr(stdscr, axis_row + 1, screen_col, label, curses.A_DIM)
 
         # Footer controls
-        ctrl = " ←→: Step   b/f: ±15 cols   [/]: Page   +/-: Zoom   Enter: Snapshot   q: Quit"
+        ctrl = " ←→: Step   b/f: ±15 cols   [/]: Page   +/-: Zoom   ↑↓: Pan Y   r: Reset Y   Enter: Snapshot   q: Quit"
         safe_addstr(stdscr, height - 1, 0, ctrl[:width - 1], curses.A_REVERSE)
 
         stdscr.refresh()
@@ -740,13 +774,15 @@ class SnapshotView:
             indent_s = ' ' * (self.INDENT * depth)
 
             is_sel = (i == self.cursor)
-            attr   = curses.A_REVERSE if is_sel else 0
+            heat   = curses.color_pair(heat_pair(tb / grand_total))
+            sel_attr = curses.A_BOLD | curses.A_REVERSE
 
             if fd is None:
                 # Leaf row: allocations with no further frames at this depth
                 frame_s = f'({count} allocation{"s" if count != 1 else ""})'
                 line = f'{indent_s}  {mem_s:>10}  {pct_par_s:>5}  {pct_tot_s:>5}  {count:>6}  {frame_s}'
-                safe_addstr(stdscr, scr_row, 0, line[:width - 1], curses.A_DIM | attr)
+                row_attr = (sel_attr | heat) if is_sel else (curses.A_DIM | heat)
+                safe_addstr(stdscr, scr_row, 0, line[:width - 1], row_attr)
             else:
                 fname = fd.get('name', '?')
                 ffile = fd.get('filename', '')
@@ -770,7 +806,8 @@ class SnapshotView:
                     frame_s = '...' + frame_s[trim:]
 
                 line = f'{prefix}{mem_s:>10}  {pct_par_s:>5}  {pct_tot_s:>5}  {count:>6}  {frame_s}'
-                safe_addstr(stdscr, scr_row, 0, line[:width - 1], attr)
+                row_attr = (sel_attr | heat) if is_sel else heat
+                safe_addstr(stdscr, scr_row, 0, line[:width - 1], row_attr)
 
         # Scrollbar
         n = len(self._rows)
@@ -797,6 +834,13 @@ def main(stdscr, data: MemoryProfileData):
     curses.init_pair(2, curses.COLOR_YELLOW, -1)   # selected column
     curses.init_pair(3, curses.COLOR_GREEN, -1)    # positive / info
     curses.init_pair(4, curses.COLOR_RED, -1)      # warning
+
+    # Heat-map pairs for snapshot view: 5=blue(cold) … 9=red(hot)
+    curses.init_pair(5, curses.COLOR_BLUE,    -1)
+    curses.init_pair(6, curses.COLOR_CYAN,    -1)
+    curses.init_pair(7, curses.COLOR_GREEN,   -1)
+    curses.init_pair(8, curses.COLOR_YELLOW,  -1)
+    curses.init_pair(9, curses.COLOR_RED,     -1)
 
     stdscr.keypad(True)
 
