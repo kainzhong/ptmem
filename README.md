@@ -10,6 +10,10 @@ An interactive terminal UI for exploring PyTorch CUDA memory snapshots. Navigate
 - **Pre-recording allocations** — memory allocated before `_record_memory_history()` is reconstructed from the `segments` final state so the timeline is always accurate from the very start
 - **Fast cache** — parsed data is cached next to the source file (`.memcache`) so subsequent loads are instant
 
+![Timeline View](doc/screenshot1.png)
+
+![Detail View](doc/screenshot1.png)
+
 ## Recording a snapshot
 
 ```python
