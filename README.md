@@ -12,7 +12,7 @@ An interactive terminal UI for exploring PyTorch CUDA memory snapshots. Navigate
 
 ![Timeline View](doc/screenshot1.png)
 
-![Detail View](doc/screenshot1.png)
+![Detail View](doc/screenshot2.png)
 
 ## Recording a snapshot
 
