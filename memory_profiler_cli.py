@@ -60,16 +60,22 @@ class MemoryProfileData:
     source file's mtime changes.
     """
 
-    CACHE_VERSION = 3
+    CACHE_VERSION = 5
 
     def __init__(self, path: str):
         self.path = path
         self.allocations: list = []
+        # timeline_times  = event indices 0, 1, 2, … (like PyTorch's JS viz)
+        # timeline_times_us = corresponding wall-clock timestamps in µs (for display)
         self.timeline_times: list = []
+        self.timeline_times_us: list = []
         self.timeline_memory: list = []
-        self.min_time: int = 0
-        self.max_time: int = 0
+        self.min_time: int = 0   # always 0 (first event index)
+        self.max_time: int = 0   # N-1 (last event index)
         self.max_memory: int = 0
+        self.initial_memory: int = 0
+        self.wall_min_us: int = 0   # actual wall-clock start (µs) for display
+        self.wall_max_us: int = 0   # actual wall-clock end (µs) for display
         self.from_cache: bool = False
 
         cache_path = self._cache_path()
@@ -98,12 +104,16 @@ class MemoryProfileData:
                 return False
             if cache.get('source_mtime') != src_mtime:
                 return False
-            self.allocations    = cache['allocations']
-            self.timeline_times = cache['timeline_times']
-            self.timeline_memory= cache['timeline_memory']
-            self.min_time       = cache['min_time']
-            self.max_time       = cache['max_time']
-            self.max_memory     = cache['max_memory']
+            self.allocations       = cache['allocations']
+            self.timeline_times    = cache['timeline_times']
+            self.timeline_times_us = cache['timeline_times_us']
+            self.timeline_memory   = cache['timeline_memory']
+            self.min_time          = cache['min_time']
+            self.max_time          = cache['max_time']
+            self.max_memory        = cache['max_memory']
+            self.initial_memory    = cache['initial_memory']
+            self.wall_min_us       = cache['wall_min_us']
+            self.wall_max_us       = cache['wall_max_us']
             return True
         except Exception:
             return False
@@ -113,12 +123,16 @@ class MemoryProfileData:
             cache = {
                 'version':      self.CACHE_VERSION,
                 'source_mtime': os.path.getmtime(self.path),
-                'allocations':  self.allocations,
-                'timeline_times':  self.timeline_times,
-                'timeline_memory': self.timeline_memory,
-                'min_time':  self.min_time,
-                'max_time':  self.max_time,
-                'max_memory': self.max_memory,
+                'allocations':      self.allocations,
+                'timeline_times':   self.timeline_times,
+                'timeline_times_us': self.timeline_times_us,
+                'timeline_memory':  self.timeline_memory,
+                'min_time':         self.min_time,
+                'max_time':         self.max_time,
+                'max_memory':       self.max_memory,
+                'initial_memory':   self.initial_memory,
+                'wall_min_us':      self.wall_min_us,
+                'wall_max_us':      self.wall_max_us,
             }
             with open(cache_path, 'wb') as f:
                 pickle.dump(cache, f)
@@ -134,18 +148,17 @@ class MemoryProfileData:
             if flat:
                 device_traces = [flat]
 
-        # Collect alloc and free_requested events only.
-        # PyTorch caching-allocator lifecycle per tensor:
+        # Collect alloc and free_completed events, matching PyTorch's MemoryViz.js:
         #   alloc          → tensor carved from cache pool  (+size to allocated)
-        #   free_requested → Python releases tensor          (-size from allocated)
-        #   free_completed → block returned to CUDA driver  (cache-layer event, skip)
+        #   free_completed → block returned to CUDA pool    (-size from allocated)
+        # (free_requested is intentionally skipped, matching the JS behaviour.)
         events = []
         synthetic_time = 0
 
         for device_idx, trace in enumerate(device_traces):
             for event in trace:
                 action = event.get('action', '')
-                if action not in ('alloc', 'free_requested'):
+                if action not in ('alloc', 'free_completed'):
                     continue
                 size   = event.get('size', 0)
                 addr   = event.get('addr', 0)
@@ -164,6 +177,7 @@ class MemoryProfileData:
         # ── Establish baseline from segments ──────────────────────────────────
         # `segments` is the ground-truth final state.  Derive initial_memory so
         # that replaying the trace from it lands exactly on final_allocated.
+        # We use b['size'] (allocator-rounded) consistently with event sizes.
         def _seg_allocated(seg):
             if 'allocated_size' in seg:
                 return seg['allocated_size']
@@ -174,30 +188,44 @@ class MemoryProfileData:
         net_from_trace  = sum(size if act == 'alloc' else -size
                               for _, _, size, _, _, act in events)
         initial_memory  = max(0, final_allocated - net_from_trace)
+        self.initial_memory = initial_memory
 
-        # ── Replay ────────────────────────────────────────────────────────────
+        # ── Replay using event INDEX as the x-axis (matching PyTorch JS) ──────
+        # PyTorch's MemoryViz.js uses a discrete "timestep" counter (one per
+        # event) rather than wall-clock time.  This gives uniform horizontal
+        # spacing so forward/backward passes look proportional regardless of
+        # the actual elapsed time of each operation.
         active: dict = {}   # addr -> Allocation  (in-trace allocs only)
         current_memory = initial_memory
 
-        for time_us, addr, size, frames, device, action in events:
+        # Record the state BEFORE the first event (event index -1) so the
+        # initial baseline is visible at the very left of the chart.
+        self.timeline_times.append(-1)
+        self.timeline_times_us.append(events[0][0])   # wall time of first event
+        self.timeline_memory.append(initial_memory)
+
+        for event_idx, (time_us, addr, size, frames, device, action) in enumerate(events):
             if action == 'alloc':
-                alloc = Allocation(addr, size, time_us, frames, device)
+                alloc = Allocation(addr, size, event_idx, frames, device)
                 active[addr] = alloc
                 self.allocations.append(alloc)
                 current_memory += size
-            elif action == 'free_requested':
+            elif action == 'free_completed':
                 if addr in active:
-                    active[addr].time_free = time_us
+                    active[addr].time_free = event_idx
                     del active[addr]
                 current_memory = max(0, current_memory - size)
 
-            self.timeline_times.append(time_us)
+            self.timeline_times.append(event_idx)
+            self.timeline_times_us.append(time_us)
             self.timeline_memory.append(current_memory)
 
         if self.timeline_times:
-            self.min_time  = self.timeline_times[0]
-            self.max_time  = self.timeline_times[-1]
-            self.max_memory = max(self.timeline_memory)
+            self.min_time    = self.timeline_times[0]   # -1 (the baseline point)
+            self.max_time    = self.timeline_times[-1]  # N-1
+            self.max_memory  = max(self.initial_memory, max(self.timeline_memory))
+            self.wall_min_us = self.timeline_times_us[0]
+            self.wall_max_us = self.timeline_times_us[-1]
 
         # ── Reconstruct pre-recording allocations from segments ───────────────
         # active_allocated blocks whose address is not in `active` (in-trace
@@ -205,10 +233,9 @@ class MemoryProfileData:
         # _record_memory_history() started.  We create synthetic Allocation
         # objects for them so the detail view shows their frames and sizes.
         #
-        # Block address: taken from block['addr'] if present (newer PyTorch),
-        # otherwise computed as segment base + cumulative block offset.
+        # Block address field: newer PyTorch uses 'address' (not 'addr').
         in_trace_addrs = set(active.keys())
-        pre_trace_time = self.min_time - 1   # guaranteed < any real event time
+        pre_trace_time = self.min_time   # event index -1, guaranteed < 0
 
         for seg in raw.get('segments', []):
             device_idx = seg.get('device', 0)
@@ -218,7 +245,7 @@ class MemoryProfileData:
                 size  = block.get('size', 0)
                 state = block.get('state', '')
                 if state == 'active_allocated':
-                    addr   = block.get('addr', base_addr + offset)
+                    addr   = block.get('address', block.get('addr', base_addr + offset))
                     frames = block.get('frames', [])
                     if addr not in in_trace_addrs:
                         alloc = Allocation(addr, size, pre_trace_time, frames, device_idx)
@@ -230,7 +257,7 @@ class MemoryProfileData:
         if not self.timeline_times:
             return 0
         idx = bisect_right(self.timeline_times, time_us) - 1
-        return self.timeline_memory[idx] if idx >= 0 else 0
+        return self.timeline_memory[idx] if idx >= 0 else self.initial_memory
 
     def get_bucket_max_memory(self, start_us: float, end_us: float) -> int:
         """Peak memory in the half-open interval [start_us, end_us)."""
@@ -239,7 +266,7 @@ class MemoryProfileData:
         i0 = bisect_left(self.timeline_times, start_us)
         i1 = bisect_left(self.timeline_times, end_us)
         # Include the memory level just before the bucket starts
-        mem_before = self.timeline_memory[i0 - 1] if i0 > 0 else 0
+        mem_before = self.timeline_memory[i0 - 1] if i0 > 0 else self.initial_memory
         candidates = [mem_before] + self.timeline_memory[i0:i1]
         return max(candidates)
 
@@ -513,19 +540,27 @@ class TimelineView:
         y_range = max(1, y_top - y_bottom)
 
         # Header
-        cur_time = self.current_time_us()
-        cur_mem = self.data.get_memory_at(cur_time)
-        rel_time = cur_time - self.data.min_time
-        total_span = self.data.max_time - self.data.min_time
+        cur_event = int(self.current_time_us())   # event index (-1 = baseline)
+        cur_mem   = self.data.get_memory_at(cur_event)
+
+        # Wall-clock time at the cursor position
+        tus = self.data.timeline_times_us
+        if tus:
+            clamp = max(0, min(cur_event, len(tus) - 1))
+            wall_cursor_us = tus[clamp]
+            rel_us = wall_cursor_us - tus[0]
+        else:
+            rel_us = 0
+        wall_span_us = self.data.wall_max_us - self.data.wall_min_us
+        n_events = self.data.max_time + 1   # event indices 0 … max_time
 
         hdr1 = (f"PyTorch Memory Profiler  |  "
-                f"Bucket: {fmt_time(self.bucket_us)}/col  |  "
-                f"Cursor: +{fmt_time(rel_time)}  |  "
+                f"Bucket: {self.bucket_us} events/col  |  "
+                f"Cursor: event {max(0, cur_event)} (+{fmt_time(rel_us)})  |  "
                 f"Memory: {fmt_bytes(cur_mem)}")
         y_range_s = (f"Y: {fmt_bytes(y_bottom)} – {fmt_bytes(y_top)}"
                      if y_bottom > 0 else f"Peak: {fmt_bytes(self.data.max_memory)}")
-        hdr2 = (f"Range: {fmt_time(self.data.min_time)} – {fmt_time(self.data.max_time)}  |  "
-                f"Span: {fmt_time(total_span)}  |  "
+        hdr2 = (f"Events: {n_events}  |  Wall span: {fmt_time(wall_span_us)}  |  "
                 f"{y_range_s}")
         safe_addstr(stdscr, 0, 0, hdr1[:width - 1], curses.A_BOLD)
         safe_addstr(stdscr, 1, 0, hdr2[:width - 1])
@@ -581,7 +616,7 @@ class TimelineView:
         axis_row = HEADER + chart_rows
         safe_addstr(stdscr, axis_row, 0, ' ' * (Y_AXIS_W - 1) + '└' + '─' * min(chart_cols, width - Y_AXIS_W - 1), curses.A_DIM)
 
-        # Time labels along x axis (skip out-of-range/empty columns)
+        # Event-index labels along x axis (skip out-of-range/empty columns)
         n_labels = max(2, min(8, chart_cols // 12))
         for i in range(n_labels + 1):
             col = int(i * (chart_cols - 1) / n_labels)
@@ -589,8 +624,7 @@ class TimelineView:
                 b_start = buckets[col][0]
                 if b_start is None:
                     continue
-                t = b_start - self.data.min_time
-                label = fmt_time(t)
+                label = str(max(0, int(b_start)))   # event index
                 screen_col = Y_AXIS_W + col
                 if screen_col + len(label) < width:
                     safe_addstr(stdscr, axis_row + 1, screen_col, label, curses.A_DIM)
@@ -735,9 +769,17 @@ class SnapshotView:
         total_mem = sum(a.size for a in self.allocations)
         grand_total = total_mem or 1
 
-        # Header
-        wall = datetime.datetime.fromtimestamp(self.time_us / 1e6).strftime('%Y-%m-%d %H:%M:%S.%f')
-        hdr = (f"Snapshot @ {wall}  (+{fmt_time(self.time_us - self.data.min_time)} from start)  |  "
+        # Header – self.time_us is now an event index; look up the wall-clock time
+        event_idx = int(self.time_us)
+        tus = self.data.timeline_times_us
+        if tus and 0 <= event_idx < len(tus):
+            wall_us  = tus[event_idx]
+            rel_us   = wall_us - tus[0]
+            wall     = datetime.datetime.fromtimestamp(wall_us / 1e6).strftime('%Y-%m-%d %H:%M:%S.%f')
+            time_tag = f"event {event_idx} / {wall} (+{fmt_time(rel_us)})"
+        else:
+            time_tag = f"event {max(0, event_idx)} (pre-recording baseline)"
+        hdr = (f"Snapshot @ {time_tag}  |  "
                f"{len(self.allocations)} allocs  |  {fmt_bytes(total_mem)} total")
         safe_addstr(stdscr, 0, 0, hdr[:width - 1], curses.A_BOLD)
 
