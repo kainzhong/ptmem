@@ -109,6 +109,7 @@ The tool replays `alloc` / `free_completed` events (ignoring `free_requested`, w
 
 ## License
 
-This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
-You are free to use, study, modify, and distribute this software, provided that any derivative works are also distributed under the same license.
-See the [LICENSE](LICENSE) file or <https://www.gnu.org/licenses/gpl-3.0.html> for the full text.
+This project is licensed under the **MIT License**.
+Copyright (c) 2026 Kaining Zhong.
+You are free to use, modify, and distribute this software as long as you include the original copyright notice.
+See the [LICENSE](LICENSE) file for the full text.
