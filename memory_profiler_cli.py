@@ -363,7 +363,6 @@ def fmt_time(us: float) -> str:
 
 def heat_pair(pct: float) -> int:
     """Return curses color pair (5–9) for a fraction 0.0–1.0 of total memory."""
-    # 5 thresholds: <5% blue, <20% cyan, <40% green, <70% yellow, else red
     if pct < 0.05:
         return 5
     if pct < 0.20:
@@ -373,6 +372,19 @@ def heat_pair(pct: float) -> int:
     if pct < 0.70:
         return 8
     return 9
+
+
+def heat_pair_match(pct: float) -> int:
+    """Return curses color pair (10–14) — same heat colors but on white background."""
+    if pct < 0.05:
+        return 10
+    if pct < 0.20:
+        return 11
+    if pct < 0.40:
+        return 12
+    if pct < 0.70:
+        return 13
+    return 14
 
 
 def safe_addstr(win, y, x, text, attr=0):
@@ -775,10 +787,6 @@ class SnapshotView:
                 self._search_match_set = set()
             elif key in (curses.KEY_ENTER, ord('\n'), ord('\r')):  # Enter – confirm
                 self.search_mode = False
-            elif key == ord('n'):                                # n – next match
-                self._jump_to_next_match(list_rows)
-            elif key == ord('N'):                                # N – prev match
-                self._jump_to_prev_match(list_rows)
             elif key in (curses.KEY_BACKSPACE, 127, 8):          # Backspace
                 self.search_query = self.search_query[:-1]
                 self._update_search_matches()
@@ -852,6 +860,11 @@ class SnapshotView:
                         # Collapse the nearest expanded ancestor
                         self._toggle(key_path[:-1])
                     self._rebuild()
+
+        elif key == 27:                                          # Escape – clear highlights
+            self.search_query = ''
+            self.search_matches = []
+            self._search_match_set = set()
 
         elif key == ord('/'):
             self.search_mode = True
@@ -970,7 +983,7 @@ class SnapshotView:
                 if is_sel:
                     row_attr = sel_attr | heat
                 elif is_match:
-                    row_attr = heat | curses.A_BOLD | curses.color_pair(3)
+                    row_attr = curses.color_pair(heat_pair_match(tb / grand_total))
                 else:
                     row_attr = heat
                 safe_addstr(stdscr, scr_row, 0, line[:width - 1], row_attr)
@@ -985,9 +998,9 @@ class SnapshotView:
         if self.search_mode:
             n_matches = len(self.search_matches)
             if not self.search_query:
-                hint = '  (type to search — n: next  N: prev  Enter: confirm  Esc: cancel)'
+                hint = '  (type to search — Enter: confirm  Esc: cancel)'
             elif n_matches:
-                hint = f'  ({n_matches} match{"es" if n_matches != 1 else ""} — n: next  N: prev  Enter: confirm  Esc: cancel)'
+                hint = f'  ({n_matches} match{"es" if n_matches != 1 else ""} — Enter: confirm  Esc: cancel)'
             else:
                 hint = '  (no matches — Esc: cancel)'
             bar = f'/{self.search_query}{hint}'
@@ -1021,6 +1034,12 @@ def main(stdscr, data: MemoryProfileData):
     curses.init_pair(7, curses.COLOR_GREEN,   -1)
     curses.init_pair(8, curses.COLOR_YELLOW,  -1)
     curses.init_pair(9, curses.COLOR_RED,     -1)
+    # Heat pairs with white background for search match highlighting (10–14)
+    curses.init_pair(10, curses.COLOR_BLUE,   curses.COLOR_WHITE)
+    curses.init_pair(11, curses.COLOR_CYAN,   curses.COLOR_WHITE)
+    curses.init_pair(12, curses.COLOR_GREEN,  curses.COLOR_WHITE)
+    curses.init_pair(13, curses.COLOR_YELLOW, curses.COLOR_WHITE)
+    curses.init_pair(14, curses.COLOR_RED,    curses.COLOR_WHITE)
 
     stdscr.keypad(True)
 
