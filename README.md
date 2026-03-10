@@ -14,6 +14,32 @@ An interactive terminal UI for exploring PyTorch CUDA memory snapshots. Navigate
 
 ![Detail View](doc/screenshot2.png)
 
+## Why use this over PyTorch's memory profiler visualizer?
+
+PyTorch ships with an official memory visualizer (`torch.cuda._memory_viz`) that renders an interactive HTML page. That tool is excellent for a broad overview, but it has real limitations when you are actively debugging a memory problem. This CLI tool is designed to close those gaps.
+
+### Examine memory at any specific moment
+
+The HTML visualizer shows you a continuous memory curve, but clicking a point in it does not tell you *what* is allocated there — only how much total memory is in use. This tool takes a different approach: the timeline and detail views are directly linked. You navigate the timeline with arrow keys, and at any point you can press `Enter` to open the detail view for that exact allocation state. The detail view shows every live tensor at that moment, grouped by the call stack that created it, with byte counts at every level of the tree. This makes it straightforward to answer questions like "right after the forward pass completes, what is still holding memory and why?" rather than having to guess from aggregate numbers.
+
+### Use it on a remote training node over SSH
+
+Most real training runs happen on remote GPU nodes — a cloud VM, a university cluster, or a company compute node. PyTorch's HTML visualizer requires downloading the snapshot file to your local machine and opening it in a browser, which is inconvenient when the file is several hundred megabytes and your connection is slow. This tool runs entirely inside the terminal. You can SSH into the node, point it at the snapshot file in place, and start exploring immediately — no file transfer, no browser, no port-forwarding needed.
+
+### Attribute memory to specific functions
+
+A common frustration with memory profiling is knowing that 18 GB is in use, but not knowing which part of your code is responsible. The detail view solves this by grouping all live allocations by their call stack and rolling the totals up the tree. At a glance you can see, for example, that the optimizer accounts for 6 GB, the activation cache accounts for 8 GB, and the model parameters account for the remaining 4 GB. Expanding any node drills deeper into the call stack, letting you trace a large allocation all the way back to the exact line of code that created it. Each frame is color-coded by its share of total memory — blue for small contributors, through cyan, green, and yellow, up to red for the biggest — so the expensive parts stand out before you even start reading.
+
+### Search by function or module name
+
+Real models have deep call stacks. A single forward pass through a large transformer might involve dozens of nested function calls before reaching the actual tensor operation. Manually expanding the tree to find a specific layer or function can take a long time. Pressing `/` opens an incremental search bar: type any substring of a function name or filename and every matching frame is highlighted in the tree immediately. Press `n` / `N` to jump between matches. This lets you jump directly to, say, `attention` or `cross_entropy` or a specific file in your codebase without touching anything else.
+
+### Compare two snapshots side by side
+
+Fixing a memory regression often means comparing a before and after: "did this optimization actually reduce peak memory?" With a browser-based tool you have to switch tabs and try to mentally align two separate charts. With a terminal tool you can open two snapshots in two terminal panes or tabs and scroll both to the same event index simultaneously, making differences immediately visible. Because the interface is purely text, it also works well inside a terminal multiplexer like `tmux` or `screen`, where you can arrange panes however you like.
+
+TODO: currently you need to open two terminal tabs to compare, but this should be able to integrate into this tool and become a build-in feature.
+
 ## Recording a snapshot
 
 ```python
@@ -60,10 +86,17 @@ The tool parses the snapshot (or loads the cache), prints a brief summary, then 
 |-----|--------|
 | `↑` / `↓` | Navigate rows |
 | `[` / `]` | Jump to previous / next sibling frame |
-| `→` / `Enter` | Expand or collapse selected frame |
-| `E` | Recursively expand selected frame and all descendants |
-| `←` | Collapse selected frame (or nearest expanded ancestor) |
-| `q` | Return to timeline view |
+| `Enter` | Expand or collapse selected frame |
+| `→` | Move cursor to selected frame's first child (expands if needed) |
+| `←` | Move cursor to selected frame's parent |
+| `e` | Recursively expand selected frame and all descendants |
+| `c` | Collapse all frames |
+| `r` | Jump cursor to the root of the current tree |
+| `f` | Focus: make selected frame the new root (resets indentation) |
+| `q` | Unfocus (pop focus stack) or return to timeline view |
+| `/` | Open search bar (type to filter frames by name) |
+| `n` / `N` | Jump to next / previous search match |
+| `Esc` | Clear search highlights |
 
 ## How it works
 
@@ -72,7 +105,7 @@ PyTorch's `_dump_snapshot()` produces a pickle file containing:
 - **`device_traces`** — a sequence of `alloc` / `free_requested` / `free_completed` events with timestamps and call frames
 - **`segments`** — the final live state of every CUDA memory segment at dump time, including blocks and their frames
 
-The tool replays `alloc` / `free_requested` events (ignoring `free_completed`, which is a cache-layer detail) to reconstruct the full memory timeline. It also derives memory allocated *before* `_record_memory_history()` was called from the `segments` data, so the timeline baseline is accurate rather than starting from zero.
+The tool replays `alloc` / `free_completed` events (ignoring `free_requested`, which is a cache-layer detail) to reconstruct the full memory timeline. It also derives memory allocated *before* `_record_memory_history()` was called from the `segments` data, so the timeline baseline is accurate rather than starting from zero.
 
 ## License
 
