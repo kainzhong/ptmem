@@ -815,12 +815,24 @@ class SnapshotView:
         elif key in (ord(']'),):
             self._scroll_to(self._find_sibling(1), list_rows)
 
-        elif key in (curses.KEY_RIGHT, curses.KEY_ENTER, ord('\n'), ord('\r')):
+        elif key in (curses.KEY_ENTER, ord('\n'), ord('\r')):
             if 0 <= self.cursor < n:
                 depth, fd, sa, tb, is_exp, _, key_path = self._rows[self.cursor]
                 if fd is not None:
                     self._toggle(key_path)
                     self._rebuild()
+
+        elif key == curses.KEY_RIGHT:
+            # Go to first child: expand if needed, then move cursor down one
+            if 0 <= self.cursor < n:
+                depth, fd, sa, tb, is_exp, _, key_path = self._rows[self.cursor]
+                if fd is not None and sa:
+                    if not is_exp:
+                        self._toggle(key_path)
+                        self._rebuild()
+                    # After possible rebuild, cursor+1 is the first child
+                    if self.cursor + 1 < len(self._rows):
+                        self._scroll_to(self.cursor + 1, list_rows)
 
         elif key == ord('e'):
             # Recursively expand all descendants
@@ -849,17 +861,27 @@ class SnapshotView:
                     self.scroll = 0
                     self._rebuild()
 
+        elif key == ord('r'):
+            # Jump cursor to the first row (root of current tree)
+            self.cursor = 0
+            self.scroll = 0
+
+        elif key == ord('c'):
+            # Collapse all: clear expanded_tree so nothing is expanded
+            self.expanded_tree = {}
+            self.cursor = 0
+            self.scroll = 0
+            self._rebuild()
+
         elif key == curses.KEY_LEFT:
+            # Go to parent: scan backward for first row with depth - 1
             if 0 <= self.cursor < n:
-                depth, fd, sa, tb, is_exp, _, key_path = self._rows[self.cursor]
-                if fd is not None:
-                    if is_exp:
-                        # Collapse this frame
-                        self._toggle(key_path)
-                    elif len(key_path) > 1:
-                        # Collapse the nearest expanded ancestor
-                        self._toggle(key_path[:-1])
-                    self._rebuild()
+                depth = self._rows[self.cursor][0]
+                if depth > self.focus_level:
+                    for i in range(self.cursor - 1, -1, -1):
+                        if self._rows[i][0] == depth - 1:
+                            self._scroll_to(i, list_rows)
+                            break
 
         elif key == 27:                                          # Escape – clear highlights
             self.search_query = ''
@@ -1009,7 +1031,7 @@ class SnapshotView:
                         curses.A_REVERSE | (0 if n_matches or not self.search_query
                                             else curses.color_pair(4)))
         else:
-            ctrl = ' ↑↓: Navigate   [ or ]: Prev/next sibling   → or Enter: Toggle   e: Expand all   f: Focus   /: Search   n/N: Next/prev match   ←: Collapse   q: Unfocus/Back'
+            ctrl = ' ↑↓: Navigate   [ or ]: Prev/next sibling   Enter: Toggle   →: First child   ←: Parent   e: Expand all   c: Collapse all   f: Focus   r: Root   /: Search   n/N: Next/prev match   q: Unfocus/Back'
             safe_addstr(stdscr, height - 1, 0, ctrl[:width - 1], curses.A_REVERSE)
 
         stdscr.refresh()
