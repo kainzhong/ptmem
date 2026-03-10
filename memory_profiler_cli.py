@@ -16,8 +16,12 @@ Timeline View Controls:
 Snapshot View Controls:
     ↑ ↓       Navigate frames
     → / Enter Toggle expand/collapse on selected frame
+    e         Expand selected frame and all descendants
+    f         Focus: make selected frame the root (resets indentation)
+    /         Search frames by name or filename
+    n / N     Next / previous match (works during and after search)
     ←         Collapse deepest expanded frame
-    q         Return to timeline view
+    q         Unfocus (pop focus) / return to timeline view
 
 Notes:
     - Snapshot is captured by calling:
@@ -656,12 +660,39 @@ class SnapshotView:
         self.cursor = 0
         self.scroll = 0
         self._rows: list = []
+        # Focus state: narrows the tree to a subtree rooted at a chosen frame.
+        # focus_sa    – allocations in scope (subset of self.allocations)
+        # focus_level – frame level passed to build_tree_rows (≥ 0)
+        # focus_stack – [(sa, level, expanded_tree, cursor, scroll, label), …]
+        self.focus_sa: list = self.allocations
+        self.focus_level: int = 0
+        self.focus_stack: list = []
+        # Search state
+        self.search_mode: bool = False
+        self.search_query: str = ''
+        self.search_matches: list = []   # sorted row indices that match the query
+        self._search_match_set: set = set()
         self._rebuild()
 
     def _rebuild(self):
-        self._rows = build_tree_rows(self.allocations, self.expanded_tree)
+        self._rows = build_tree_rows(self.focus_sa, self.expanded_tree,
+                                     level=self.focus_level)
         self.cursor = min(self.cursor, max(0, len(self._rows) - 1))
         self.scroll = min(self.scroll, max(0, len(self._rows) - 1))
+        self._update_search_matches()
+
+    def _update_search_matches(self) -> None:
+        """Recompute which visible rows match the current search query."""
+        if not self.search_query:
+            self.search_matches = []
+            return
+        q = self.search_query.lower()
+        self.search_matches = [
+            i for i, (_, fd, _, _, _, _, _) in enumerate(self._rows)
+            if fd is not None
+            and (q in fd.get('name', '').lower() or q in fd.get('filename', '').lower())
+        ]
+        self._search_match_set: set = set(self.search_matches)
 
     def _toggle(self, key_path: tuple) -> None:
         """Expand if absent, collapse if present — navigating expanded_tree by key_path."""
@@ -712,8 +743,53 @@ class SnapshotView:
         elif self.cursor >= self.scroll + list_rows:
             self.scroll = self.cursor - list_rows + 1
 
+    def _jump_to_next_match(self, list_rows: int) -> None:
+        """Move cursor to the next search match after the current position (wraps)."""
+        if not self.search_matches:
+            return
+        for m in self.search_matches:
+            if m > self.cursor:
+                self._scroll_to(m, list_rows)
+                return
+        self._scroll_to(self.search_matches[0], list_rows)
+
+    def _jump_to_prev_match(self, list_rows: int) -> None:
+        """Move cursor to the previous search match before the current position (wraps)."""
+        if not self.search_matches:
+            return
+        for m in reversed(self.search_matches):
+            if m < self.cursor:
+                self._scroll_to(m, list_rows)
+                return
+        self._scroll_to(self.search_matches[-1], list_rows)
+
     def handle_key(self, key: int, list_rows: int) -> str:
         n = len(self._rows)
+
+        # ── Search mode ───────────────────────────────────────────────────────
+        if self.search_mode:
+            if key == 27:                                        # Escape – cancel
+                self.search_mode = False
+                self.search_query = ''
+                self.search_matches = []
+                self._search_match_set = set()
+            elif key in (curses.KEY_ENTER, ord('\n'), ord('\r')):  # Enter – confirm
+                self.search_mode = False
+            elif key == ord('n'):                                # n – next match
+                self._jump_to_next_match(list_rows)
+            elif key == ord('N'):                                # N – prev match
+                self._jump_to_prev_match(list_rows)
+            elif key in (curses.KEY_BACKSPACE, 127, 8):          # Backspace
+                self.search_query = self.search_query[:-1]
+                self._update_search_matches()
+                if self.search_matches:
+                    self._scroll_to(self.search_matches[0], list_rows)
+            elif 32 <= key <= 126:                               # printable character
+                self.search_query += chr(key)
+                self._update_search_matches()
+                if self.search_matches:
+                    self._scroll_to(self.search_matches[0], list_rows)
+            return 'snapshot'
 
         if key == curses.KEY_UP:
             self.cursor = max(0, self.cursor - 1)
@@ -738,12 +814,31 @@ class SnapshotView:
                     self._toggle(key_path)
                     self._rebuild()
 
-        elif key in (ord('E'),):
-            # Recursively expand all descendants (Shift+Enter equivalent)
+        elif key == ord('e'):
+            # Recursively expand all descendants
             if 0 <= self.cursor < n:
                 depth, fd, sa, tb, is_exp, _, key_path = self._rows[self.cursor]
                 if fd is not None:
                     self._expand_recursive(key_path, sa, depth)
+                    self._rebuild()
+
+        elif key == ord('f'):
+            # Focus: make the selected frame the new root.
+            # Indentation resets to 0; 'q' pops back to the previous focus.
+            if 0 <= self.cursor < n:
+                depth, fd, sa, tb, is_exp, _, key_path = self._rows[self.cursor]
+                if fd is not None and sa:
+                    label = fd.get('name', '?')
+                    self.focus_stack.append((
+                        self.focus_sa, self.focus_level,
+                        self.expanded_tree, self.cursor, self.scroll,
+                        label,
+                    ))
+                    self.focus_sa    = sa
+                    self.focus_level = depth + 1
+                    self.expanded_tree = {}
+                    self.cursor = 0
+                    self.scroll = 0
                     self._rebuild()
 
         elif key == curses.KEY_LEFT:
@@ -758,8 +853,26 @@ class SnapshotView:
                         self._toggle(key_path[:-1])
                     self._rebuild()
 
+        elif key == ord('/'):
+            self.search_mode = True
+            self.search_query = ''
+            self.search_matches = []
+            self._search_match_set = set()
+
+        elif key == ord('n'):
+            self._jump_to_next_match(list_rows)
+
+        elif key == ord('N'):
+            self._jump_to_prev_match(list_rows)
+
         elif key in (ord('q'), ord('Q')):
-            return 'timeline'
+            if self.focus_stack:
+                prev = self.focus_stack.pop()
+                (self.focus_sa, self.focus_level, self.expanded_tree,
+                 self.cursor, self.scroll, _label) = prev
+                self._rebuild()
+            else:
+                return 'timeline'
 
         return 'snapshot'
 
@@ -783,13 +896,18 @@ class SnapshotView:
                f"{len(self.allocations)} allocs  |  {fmt_bytes(total_mem)} total")
         safe_addstr(stdscr, 0, 0, hdr[:width - 1], curses.A_BOLD)
 
-        # Breadcrumb: show ancestry of the selected row
+        # Breadcrumb line: focus path + selected row ancestry
+        if self.focus_stack:
+            focus_labels = [entry[5] for entry in self.focus_stack]
+            focus_prefix = 'Focus: ' + ' > '.join(focus_labels) + '   '
+        else:
+            focus_prefix = ''
         crumb_line = 'Selected: (none)'
         if 0 <= self.cursor < len(self._rows):
             depth, fd, sa, tb, is_exp, _, key_path = self._rows[self.cursor]
             if key_path:
                 crumb_line = 'Selected: ' + ' > '.join(k[0] or '?' for k in key_path)
-        safe_addstr(stdscr, 1, 0, crumb_line[:width - 1], curses.A_DIM)
+        safe_addstr(stdscr, 1, 0, (focus_prefix + crumb_line)[:width - 1], curses.A_DIM)
 
         # Column header
         col_hdr = f"  {'Memory':>10}  {'%par':>5}  {'%tot':>5}  {'Allocs':>6}  Frame"
@@ -813,10 +931,11 @@ class SnapshotView:
             pct_par_s = f'{pct_par:.1f}%'
             pct_tot_s = f'{pct_tot:.1f}%'
             count    = len(sa)
-            indent_s = ' ' * (self.INDENT * depth)
+            indent_s = ' ' * (self.INDENT * (depth - self.focus_level))
 
-            is_sel = (i == self.cursor)
-            heat   = curses.color_pair(heat_pair(tb / grand_total))
+            is_sel   = (i == self.cursor)
+            is_match = bool(self.search_matches) and i in self._search_match_set
+            heat     = curses.color_pair(heat_pair(tb / grand_total))
             sel_attr = curses.A_BOLD | curses.A_REVERSE
 
             if fd is None:
@@ -848,7 +967,12 @@ class SnapshotView:
                     frame_s = '...' + frame_s[trim:]
 
                 line = f'{prefix}{mem_s:>10}  {pct_par_s:>5}  {pct_tot_s:>5}  {count:>6}  {frame_s}'
-                row_attr = (sel_attr | heat) if is_sel else heat
+                if is_sel:
+                    row_attr = sel_attr | heat
+                elif is_match:
+                    row_attr = heat | curses.A_BOLD | curses.color_pair(3)
+                else:
+                    row_attr = heat
                 safe_addstr(stdscr, scr_row, 0, line[:width - 1], row_attr)
 
         # Scrollbar
@@ -857,9 +981,23 @@ class SnapshotView:
             pct_pos = self.scroll / max(1, n - list_rows)
             safe_addch(stdscr, LIST_START + int(pct_pos * (list_rows - 1)), width - 1, '█', curses.A_DIM)
 
-        # Footer
-        ctrl = ' ↑↓: Navigate   [/]: Prev/next sibling   →/Enter: Toggle   E: Expand all   ←: Collapse   q: Back'
-        safe_addstr(stdscr, height - 1, 0, ctrl[:width - 1], curses.A_REVERSE)
+        # Footer / search bar
+        if self.search_mode:
+            n_matches = len(self.search_matches)
+            if not self.search_query:
+                hint = '  (type to search — n: next  N: prev  Enter: confirm  Esc: cancel)'
+            elif n_matches:
+                hint = f'  ({n_matches} match{"es" if n_matches != 1 else ""} — n: next  N: prev  Enter: confirm  Esc: cancel)'
+            else:
+                hint = '  (no matches — Esc: cancel)'
+            bar = f'/{self.search_query}{hint}'
+            safe_addstr(stdscr, height - 1, 0, ' ' * (width - 1), curses.A_REVERSE)
+            safe_addstr(stdscr, height - 1, 0, bar[:width - 1],
+                        curses.A_REVERSE | (0 if n_matches or not self.search_query
+                                            else curses.color_pair(4)))
+        else:
+            ctrl = ' ↑↓: Navigate   [ or ]: Prev/next sibling   → or Enter: Toggle   e: Expand all   f: Focus   /: Search   n/N: Next/prev match   ←: Collapse   q: Unfocus/Back'
+            safe_addstr(stdscr, height - 1, 0, ctrl[:width - 1], curses.A_REVERSE)
 
         stdscr.refresh()
 
