@@ -1094,9 +1094,16 @@ def main(stdscr, data: MemoryProfileData):
                 break
 
 
+__version__ = '0.1.0'
+
+
 def run():
     if len(sys.argv) < 2 or sys.argv[1] in ('-h', '--help'):
         print(__doc__)
+        sys.exit(0)
+
+    if sys.argv[1] in ('-v', '--version'):
+        print(f'ptmem {__version__}')
         sys.exit(0)
 
     path = sys.argv[1]
