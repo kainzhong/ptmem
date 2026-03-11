@@ -55,12 +55,26 @@ torch.cuda.memory._record_memory_history(None)  # stop recording
 
 ## Installation
 
-> TODO
+```
+pip install ptmem
+```
+
+### Development install
+
+Clone the repo and install in editable mode:
+
+```
+git clone https://github.com/kainzhong/ptmem.git
+cd ptmem
+pip install -e .
+```
+
+The `ptmem` command will then reflect any local changes you make to `src/ptmem/cli.py` immediately, without reinstalling.
 
 ## Usage
 
 ```
-python memory_profiler_cli.py <snapshot.pkl>
+ptmem <snapshot.pkl>
 ```
 
 The tool parses the snapshot (or loads the cache), prints a brief summary, then launches the interactive UI.

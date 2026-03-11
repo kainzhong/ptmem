@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ptmem"
+version = "0.1.0"
+description = "Interactive terminal UI for exploring PyTorch CUDA memory snapshots"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Kaining Zhong" }]
+requires-python = ">=3.8"
+keywords = ["pytorch", "cuda", "memory", "profiler", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Monitoring",
+]
+
+[project.scripts]
+ptmem = "ptmem.cli:run"
+
+[project.urls]
+Repository = "https://github.com/kainzhong/ptmem"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ptmem"]
