@@ -94,6 +94,12 @@ The `ptmem` command will then reflect any local changes you make to `src/ptmem/c
 ptmem <snapshot.pkl>
 ```
 
+To compare two snapshots side by side:
+
+```
+ptmem -c <snapshot1.pkl> <snapshot2.pkl>
+```
+
 The tool parses the snapshot (or loads the cache), prints a brief summary, then launches the interactive UI.
 
 ## Controls
@@ -124,10 +130,23 @@ The tool parses the snapshot (or loads the cache), prints a brief summary, then 
 | `c` | Collapse all frames |
 | `r` | Jump cursor to the root of the current tree |
 | `f` | Focus: make selected frame the new root (resets indentation) |
+| `h` | Toggle hiding PyTorch internal and no-source frames |
 | `q` | Unfocus (pop focus stack) or return to timeline view |
+| `Q` | Quit the program immediately |
 | `/` | Open search bar (type to filter frames by name) |
 | `n` / `N` | Jump to next / previous search match |
 | `Esc` | Clear search highlights |
+
+When internal frames are hidden (`h`), any frame whose filename contains `/site-packages/torch/`, `/dist-packages/torch/`, or `/lib/python3`, or that has no filename or line number, is removed from every allocation's call stack before grouping. This surfaces your own code at the top of the tree instead of burying it under layers of PyTorch internals.
+
+### Compare mode (`-c` / `--compare`)
+
+| Key | Action |
+|-----|--------|
+| `{` or `}` | Switch focus between pane 1 and pane 2 |
+| `s` | Toggle between vertical split (left/right) and horizontal split (top/bottom) |
+
+All other keys operate on the currently focused pane, identical to single-file mode. The inactive pane is dimmed. The active pane is indicated by a `◀`/`▶` marker on the vertical separator or a `▲`/`▼` marker on the horizontal separator. Switching split direction automatically re-fits both timelines to the new pane width.
 
 ## How it works
 

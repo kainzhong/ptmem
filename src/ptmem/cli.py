@@ -300,17 +300,30 @@ def _frame_key(f: dict) -> tuple:
     return (f.get('name', ''), f.get('filename', ''), f.get('line', 0))
 
 
-def _group_at_level(allocations: list, level: int) -> tuple:
+_INTERNAL_PATH_SEGMENTS = ('/site-packages/torch/', '/dist-packages/torch/', '/lib/python3')
+
+def _is_internal_frame(f: dict) -> bool:
+    """Return True for PyTorch/stdlib frames or frames with no source location."""
+    filename = f.get('filename', '')
+    if not filename or not f.get('line', 0):
+        return True
+    return any(seg in filename for seg in _INTERNAL_PATH_SEGMENTS)
+
+
+def _group_at_level(allocations: list, level: int,
+                    frame_overrides: dict = None) -> tuple:
     """Group allocations by outer_frames[level]. Returns (groups, ungrouped).
 
     groups is sorted descending by total bytes.
     Each group: (frame_dict, sub_allocs, total_bytes).
     ungrouped: allocations whose stack is shallower than level+1.
+    frame_overrides: optional dict mapping id(alloc) → filtered frames list.
     """
     bucket: dict = defaultdict(list)
     ungrouped = []
     for alloc in allocations:
-        outer = alloc.frames[::-1]   # outermost first
+        frames = frame_overrides[id(alloc)] if frame_overrides and id(alloc) in frame_overrides else alloc.frames
+        outer = frames[::-1]   # outermost first
         if level < len(outer):
             nf = outer[level]
             bucket[_frame_key(nf)].append((nf, alloc))
@@ -327,7 +340,8 @@ def _group_at_level(allocations: list, level: int) -> tuple:
 
 
 def build_tree_rows(allocations: list, expanded_tree: dict,
-                    level: int = 0, key_path: tuple = ()) -> list:
+                    level: int = 0, key_path: tuple = (),
+                    frame_overrides: dict = None) -> list:
     """Build a flat list of display rows for the expandable memory tree.
 
     expanded_tree is a nested dict: presence of a frame_key means that frame is
@@ -338,8 +352,9 @@ def build_tree_rows(allocations: list, expanded_tree: dict,
         (depth, frame_dict|None, sub_allocs, total_bytes, is_expanded,
          level_total, key_path)
     frame_dict=None marks a leaf row (allocations with no further call frames).
+    frame_overrides: optional dict mapping id(alloc) → filtered frames list.
     """
-    groups, ungrouped = _group_at_level(allocations, level)
+    groups, ungrouped = _group_at_level(allocations, level, frame_overrides)
     level_total = sum(g[2] for g in groups) + sum(a.size for a in ungrouped)
 
     rows = []
@@ -349,7 +364,8 @@ def build_tree_rows(allocations: list, expanded_tree: dict,
         cur_path = key_path + (fk,)
         rows.append((level, fd, sa, tb, is_exp, level_total, cur_path))
         if is_exp:
-            rows.extend(build_tree_rows(sa, expanded_tree[fk], level + 1, cur_path))
+            rows.extend(build_tree_rows(sa, expanded_tree[fk], level + 1, cur_path,
+                                        frame_overrides))
 
     if ungrouped:
         ub = sum(a.size for a in ungrouped)
@@ -698,11 +714,23 @@ class SnapshotView:
         self.search_query: str = ''
         self.search_matches: list = []   # sorted row indices that match the query
         self._search_match_set: set = set()
+        # Hide-internal state
+        self.hide_internal: bool = False
         self._rebuild()
 
+    def _frame_overrides(self) -> dict | None:
+        """Return per-allocation filtered frame lists when hide_internal is on."""
+        if not self.hide_internal:
+            return None
+        return {
+            id(a): [f for f in a.frames if not _is_internal_frame(f)]
+            for a in self.allocations
+        }
+
     def _rebuild(self):
+        fo = self._frame_overrides()
         self._rows = build_tree_rows(self.focus_sa, self.expanded_tree,
-                                     level=self.focus_level)
+                                     level=self.focus_level, frame_overrides=fo)
         self.cursor = min(self.cursor, max(0, len(self._rows) - 1))
         self.scroll = min(self.scroll, max(0, len(self._rows) - 1))
         self._update_search_matches()
@@ -731,18 +759,19 @@ class SnapshotView:
         else:
             tree[leaf] = {}         # expand with empty child tree
 
-    def _expand_recursive(self, key_path: tuple, sa: list, depth: int) -> None:
+    def _expand_recursive(self, key_path: tuple, sa: list, depth: int,
+                          frame_overrides: dict = None) -> None:
         """Recursively expand this node and all its descendants."""
         tree = self.expanded_tree
         for k in key_path[:-1]:
             tree = tree.setdefault(k, {})
         sub_tree = tree.setdefault(key_path[-1], {})
         # Temporarily point expanded_tree's sub-node to sub_tree so recursive calls work
-        groups, _ = _group_at_level(sa, depth + 1)
+        groups, _ = _group_at_level(sa, depth + 1, frame_overrides)
         for fd, child_sa, _ in groups:
             fk = _frame_key(fd)
             child_path = key_path + (fk,)
-            self._expand_recursive(child_path, child_sa, depth + 1)
+            self._expand_recursive(child_path, child_sa, depth + 1, frame_overrides)
 
     def _find_sibling(self, direction: int) -> int:
         """Return row index of previous (direction=-1) or next (direction=1) strict sibling."""
@@ -853,7 +882,7 @@ class SnapshotView:
             if 0 <= self.cursor < n:
                 depth, fd, sa, tb, is_exp, _, key_path = self._rows[self.cursor]
                 if fd is not None:
-                    self._expand_recursive(key_path, sa, depth)
+                    self._expand_recursive(key_path, sa, depth, self._frame_overrides())
                     self._rebuild()
 
         elif key == ord('f'):
@@ -879,6 +908,14 @@ class SnapshotView:
             # Jump cursor to the first row (root of current tree)
             self.cursor = 0
             self.scroll = 0
+
+        elif key == ord('h'):
+            # Toggle hiding of PyTorch internal / no-source frames
+            self.hide_internal = not self.hide_internal
+            self.expanded_tree = {}   # reset expansion since frame structure changes
+            self.cursor = 0
+            self.scroll = 0
+            self._rebuild()
 
         elif key == ord('c'):
             # Collapse all: clear expanded_tree so nothing is expanded
@@ -914,7 +951,10 @@ class SnapshotView:
         elif key == ord('N'):
             self._jump_to_prev_match(list_rows)
 
-        elif key in (ord('q'), ord('Q')):
+        elif key == ord('Q'):
+            return 'quit'
+
+        elif key == ord('q'):
             if self.focus_stack:
                 prev = self.focus_stack.pop()
                 (self.focus_sa, self.focus_level, self.expanded_tree,
@@ -1032,7 +1072,8 @@ class SnapshotView:
 
         # Footer / search bar (two lines)
         ctrl1 = ' ↑↓: Navigate   [ or ]: Prev/next sibling   →: First child   ←: Parent   Enter: Toggle   e: Expand all   c: Collapse all'
-        ctrl2 = ' r: Root   f: Focus   /: Search   n/N: Next/prev match   Esc: Clear highlights   q: Unfocus/Back'
+        hide_label = 'Show' if self.hide_internal else 'Hide'
+        ctrl2 = f' r: Root   f: Focus   h: {hide_label} internal frames   /: Search   n/N: Next/prev match   Esc: Clear highlights   q: Unfocus/Back   Q: Quit'
         if self.search_mode:
             n_matches = len(self.search_matches)
             if not self.search_query:
