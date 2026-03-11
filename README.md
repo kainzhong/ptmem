@@ -10,21 +10,26 @@ An interactive terminal UI for exploring PyTorch CUDA memory snapshots. Navigate
 - **Pre-recording allocations** — memory allocated before `_record_memory_history()` is reconstructed from the `segments` final state so the timeline is always accurate from the very start
 - **Fast cache** — parsed data is cached next to the source file (`.memcache`) so subsequent loads are instant
 
-![Timeline View](doc/screenshot1.png)
-
-![Detail View](doc/screenshot2.png)
+https://github.com/user-attachments/assets/c59e30f0-e235-4245-becc-ce5eb2bf2e54
 
 ## Why use this over PyTorch's memory profiler visualizer?
 
+
 PyTorch ships with an official memory visualizer (`torch.cuda._memory_viz`) that renders an interactive HTML page. That tool is excellent for a broad overview, but it has real limitations when you are actively debugging a memory problem. This CLI tool is designed to close those gaps.
+
+| ptmem | PyTorch Viz |
+| --- | --- |
+| <img width="1512" height="912" alt="image" src="https://github.com/user-attachments/assets/5fd57a72-b9bc-4d27-b269-915de2aeb3df" /> | <img width="1512" height="862" alt="image" src="https://github.com/user-attachments/assets/390e8b42-d4dc-45d6-8137-3f2f7b9cbd9f" /> |
+
+### Use it on a remote training node over SSH
+
+Most real training runs happen on remote GPU nodes — a cloud VM, a university cluster, or a company compute node. PyTorch's HTML visualizer requires downloading the snapshot file to your local machine and opening it in a browser, which is inconvenient when the file is several hundred megabytes and your connection is slow. This tool runs entirely inside the terminal. You can SSH into the node, point it at the snapshot file in place, and start exploring immediately — no file transfer, no browser, no port-forwarding needed.
 
 ### Examine memory at any specific moment
 
 The HTML visualizer shows you a continuous memory curve, but clicking a point in it does not tell you *what* is allocated there — only how much total memory is in use. This tool takes a different approach: the timeline and detail views are directly linked. You navigate the timeline with arrow keys, and at any point you can press `Enter` to open the detail view for that exact allocation state. The detail view shows every live tensor at that moment, grouped by the call stack that created it, with byte counts at every level of the tree. This makes it straightforward to answer questions like "right after the forward pass completes, what is still holding memory and why?" rather than having to guess from aggregate numbers.
 
-### Use it on a remote training node over SSH
-
-Most real training runs happen on remote GPU nodes — a cloud VM, a university cluster, or a company compute node. PyTorch's HTML visualizer requires downloading the snapshot file to your local machine and opening it in a browser, which is inconvenient when the file is several hundred megabytes and your connection is slow. This tool runs entirely inside the terminal. You can SSH into the node, point it at the snapshot file in place, and start exploring immediately — no file transfer, no browser, no port-forwarding needed.
+<img width="1512" height="913" alt="image" src="https://github.com/user-attachments/assets/141ed564-64f8-40c4-9e09-521e4806a777" />
 
 ### Attribute memory to specific functions
 
@@ -34,13 +39,24 @@ A common frustration with memory profiling is knowing that 18 GB is in use, but 
 
 Real models have deep call stacks. A single forward pass through a large transformer might involve dozens of nested function calls before reaching the actual tensor operation. Manually expanding the tree to find a specific layer or function can take a long time. Pressing `/` opens an incremental search bar: type any substring of a function name or filename and every matching frame is highlighted in the tree immediately. Press `n` / `N` to jump between matches. This lets you jump directly to, say, `attention` or `cross_entropy` or a specific file in your codebase without touching anything else.
 
+<img width="1512" height="913" alt="image" src="https://github.com/user-attachments/assets/3967a9bc-4f46-4efa-864c-be2c5be949d0" />
+
+
 ### Compare two snapshots side by side
 
 Fixing a memory regression often means comparing a before and after: "did this optimization actually reduce peak memory?" With a browser-based tool you have to switch tabs and try to mentally align two separate charts. With a terminal tool you can open two snapshots in two terminal panes or tabs and scroll both to the same event index simultaneously, making differences immediately visible. Because the interface is purely text, it also works well inside a terminal multiplexer like `tmux` or `screen`, where you can arrange panes however you like.
 
-TODO: currently you need to open two terminal tabs to compare, but this should be able to integrate into this tool and become a build-in feature.
+<img width="1512" height="917" alt="image" src="https://github.com/user-attachments/assets/f09f52e5-ab84-477c-b7b8-1271ae4a39ab" />
+
+<img width="1512" height="915" alt="image" src="https://github.com/user-attachments/assets/a68ec3f8-02e7-4411-bf10-8c034a935890" />
+
+
+
+TODO: currently you need to open two terminal tabs (such as using tmux) to compare, but this should be able to integrate into this tool and become a build-in feature.
 
 ## Recording a snapshot
+
+See https://pytorch.org/blog/understanding-gpu-memory-1/ for more detail.
 
 ```python
 import torch
