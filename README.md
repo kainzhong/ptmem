@@ -4,11 +4,12 @@ An interactive terminal UI for exploring PyTorch CUDA memory snapshots. Navigate
 
 ## Features
 
-- **Timeline view** — ASCII bar chart of memory over time with horizontal zoom and vertical pan
-- **Snapshot/detail view** — expandable call-stack tree showing allocations grouped by frame at any selected moment
-- **Heat-map coloring** — frames colored blue → cyan → green → yellow → red by share of total memory
-- **Pre-recording allocations** — memory allocated before `_record_memory_history()` is reconstructed from the `segments` final state so the timeline is always accurate from the very start
-- **Fast cache** — parsed data is cached next to the source file (`.memcache`) so subsequent loads are instant
+- **Timeline view** — zoomable bar chart of memory usage across all recorded allocation events
+- **Detail view** — expandable call-stack tree with per-frame byte totals; navigate with arrow keys, expand/collapse, focus a subtree, or collapse everything at once
+- **Incremental search** — press `/` to filter frames by name; jump between matches with `n` / `N`
+- **Heat-map coloring** — frames colored blue → red by share of total memory so the biggest consumers stand out immediately
+- **Accurate baseline** — memory allocated before recording started is reconstructed from the final `segments` state, so the timeline never falsely starts at zero
+- **Fast cache** — parsed data is cached on first load; subsequent opens are instant
 
 https://github.com/user-attachments/assets/c59e30f0-e235-4245-becc-ce5eb2bf2e54
 
