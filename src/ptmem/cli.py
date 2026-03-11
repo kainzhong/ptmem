@@ -3,25 +3,39 @@
 PyTorch Memory Profiler - Interactive CLI Analyzer
 
 Usage:
-    python memory_profiler_cli.py <snapshot.pkl>
+    ptmem <snapshot.pkl>
+    ptmem -c, --compare <snapshot1.pkl> <snapshot2.pkl>
+    ptmem -v, --version
+    ptmem -h, --help
 
 Timeline View Controls:
-    ← →       Navigate time slices
+    ← →       Step one column left / right
     b / f     Jump ±15 columns
-    [ / ]     Jump ±¼ page
+    [ / ]     Jump ±¼ page left / right
     + / -     Zoom in / out
-    Enter     Open memory snapshot at current cursor position
+    ↑ ↓       Pan y-axis up / down
+    r         Reset y-axis to full range
+    Enter     Open snapshot detail at current cursor position
     q         Quit
 
-Snapshot View Controls:
-    ↑ ↓       Navigate frames
-    → / Enter Toggle expand/collapse on selected frame
-    e         Expand selected frame and all descendants
-    f         Focus: make selected frame the root (resets indentation)
-    /         Search frames by name or filename
-    n / N     Next / previous match (works during and after search)
-    ←         Collapse deepest expanded frame
-    q         Unfocus (pop focus) / return to timeline view
+Snapshot / Detail View Controls:
+    ↑ ↓       Navigate rows
+    [ / ]     Jump to previous / next sibling frame
+    Enter     Expand or collapse selected frame
+    →         Move to first child (expands if needed)
+    ←         Move to parent
+    e         Recursively expand selected frame and all descendants
+    c         Collapse all frames
+    r         Jump to root of current tree
+    f         Focus: make selected frame the new root (resets indentation)
+    /         Open search bar (type to filter by name or filename)
+    n / N     Jump to next / previous search match
+    Esc       Clear search highlights
+    q         Unfocus (pop focus stack) / return to timeline view
+
+Compare Mode Controls (-c / --compare):
+    { or }    Switch focus between left and right pane
+    (all other keys operate on the focused pane as normal)
 
 Notes:
     - Snapshot is captured by calling:
@@ -518,7 +532,7 @@ class TimelineView:
         # Centre cursor on screen, but never scroll before the first timestamp.
         self.view_start = max(0, self.cursor - n_cols // 2)
 
-    def render(self, stdscr, height: int, width: int):
+    def render(self, stdscr, height: int, width: int, extra_hint: str = ''):
         stdscr.erase()
 
         if not self.data.timeline_times:
@@ -647,9 +661,9 @@ class TimelineView:
 
         # Footer controls
         ctrl = " ←→: Step   b/f: ±15 cols   [/]: Page   +/-: Zoom   ↑↓: Pan Y   r: Reset Y   Enter: Snapshot   q: Quit"
-        safe_addstr(stdscr, height - 1, 0, ctrl[:width - 1], curses.A_REVERSE)
+        safe_addstr(stdscr, height - 1, 0, (ctrl + extra_hint)[:width - 1], curses.A_REVERSE)
 
-        stdscr.refresh()
+        stdscr.noutrefresh()
 
 
 # ─── Snapshot View ────────────────────────────────────────────────────────────
@@ -911,7 +925,7 @@ class SnapshotView:
 
         return 'snapshot'
 
-    def render(self, stdscr, height: int, width: int):
+    def render(self, stdscr, height: int, width: int, extra_hint: str = ''):
         stdscr.erase()
 
         total_mem = sum(a.size for a in self.allocations)
@@ -949,7 +963,7 @@ class SnapshotView:
         safe_addstr(stdscr, 2, 0, col_hdr[:width - 1], curses.A_UNDERLINE)
 
         LIST_START = 3
-        list_rows = height - LIST_START - 2
+        list_rows = height - LIST_START - 3   # 2 footer lines + 1 header
         if list_rows < 1:
             list_rows = 1
 
@@ -1016,7 +1030,9 @@ class SnapshotView:
             pct_pos = self.scroll / max(1, n - list_rows)
             safe_addch(stdscr, LIST_START + int(pct_pos * (list_rows - 1)), width - 1, '█', curses.A_DIM)
 
-        # Footer / search bar
+        # Footer / search bar (two lines)
+        ctrl1 = ' ↑↓: Navigate   [ or ]: Prev/next sibling   →: First child   ←: Parent   Enter: Toggle   e: Expand all   c: Collapse all'
+        ctrl2 = ' r: Root   f: Focus   /: Search   n/N: Next/prev match   Esc: Clear highlights   q: Unfocus/Back'
         if self.search_mode:
             n_matches = len(self.search_matches)
             if not self.search_query:
@@ -1026,36 +1042,34 @@ class SnapshotView:
             else:
                 hint = '  (no matches — Esc: cancel)'
             bar = f'/{self.search_query}{hint}'
-            safe_addstr(stdscr, height - 1, 0, ' ' * (width - 1), curses.A_REVERSE)
-            safe_addstr(stdscr, height - 1, 0, bar[:width - 1],
+            safe_addstr(stdscr, height - 2, 0, ' ' * (width - 1), curses.A_REVERSE)
+            safe_addstr(stdscr, height - 2, 0, bar[:width - 1],
                         curses.A_REVERSE | (0 if n_matches or not self.search_query
                                             else curses.color_pair(4)))
         else:
-            ctrl = ' ↑↓: Navigate   [ or ]: Prev/next sibling   Enter: Toggle   →: First child   ←: Parent   e: Expand all   c: Collapse all   f: Focus   r: Root   /: Search   n/N: Next/prev match   q: Unfocus/Back'
-            safe_addstr(stdscr, height - 1, 0, ctrl[:width - 1], curses.A_REVERSE)
+            safe_addstr(stdscr, height - 2, 0, (ctrl1 + extra_hint)[:width - 1], curses.A_REVERSE)
+        safe_addstr(stdscr, height - 1, 0, (ctrl2 + extra_hint)[:width - 1], curses.A_REVERSE)
 
-        stdscr.refresh()
+        stdscr.noutrefresh()
 
 
 # ─── Main App Loop ────────────────────────────────────────────────────────────
 
-def main(stdscr, data: MemoryProfileData):
-    curses.curs_set(0)
+def _init_colors() -> None:
+    """Initialize all curses color pairs (call once after start_color)."""
     curses.start_color()
     curses.use_default_colors()
-
     # Color pairs: (fg, bg), -1 = terminal default
-    curses.init_pair(1, curses.COLOR_CYAN, -1)     # normal bar
+    curses.init_pair(1, curses.COLOR_CYAN,   -1)   # normal bar
     curses.init_pair(2, curses.COLOR_YELLOW, -1)   # selected column
-    curses.init_pair(3, curses.COLOR_GREEN, -1)    # positive / info
-    curses.init_pair(4, curses.COLOR_RED, -1)      # warning
-
+    curses.init_pair(3, curses.COLOR_GREEN,  -1)   # positive / info
+    curses.init_pair(4, curses.COLOR_RED,    -1)   # warning
     # Heat-map pairs for snapshot view: 5=blue(cold) … 9=red(hot)
-    curses.init_pair(5, curses.COLOR_BLUE,    -1)
-    curses.init_pair(6, curses.COLOR_CYAN,    -1)
-    curses.init_pair(7, curses.COLOR_GREEN,   -1)
-    curses.init_pair(8, curses.COLOR_YELLOW,  -1)
-    curses.init_pair(9, curses.COLOR_RED,     -1)
+    curses.init_pair(5, curses.COLOR_BLUE,   -1)
+    curses.init_pair(6, curses.COLOR_CYAN,   -1)
+    curses.init_pair(7, curses.COLOR_GREEN,  -1)
+    curses.init_pair(8, curses.COLOR_YELLOW, -1)
+    curses.init_pair(9, curses.COLOR_RED,    -1)
     # Heat pairs with white background for search match highlighting (10–14)
     curses.init_pair(10, curses.COLOR_BLUE,   curses.COLOR_WHITE)
     curses.init_pair(11, curses.COLOR_CYAN,   curses.COLOR_WHITE)
@@ -1063,6 +1077,10 @@ def main(stdscr, data: MemoryProfileData):
     curses.init_pair(13, curses.COLOR_YELLOW, curses.COLOR_WHITE)
     curses.init_pair(14, curses.COLOR_RED,    curses.COLOR_WHITE)
 
+
+def main(stdscr, data: MemoryProfileData):
+    curses.curs_set(0)
+    _init_colors()
     stdscr.keypad(True)
 
     timeline = TimelineView(data)
@@ -1074,6 +1092,7 @@ def main(stdscr, data: MemoryProfileData):
 
         if view == 'timeline':
             timeline.render(stdscr, height, width)
+            curses.doupdate()
             key = stdscr.getch()
             result = timeline.handle_key(key, width - TimelineView.Y_AXIS_W - 1)
             if result == 'snapshot':
@@ -1085,11 +1104,114 @@ def main(stdscr, data: MemoryProfileData):
         elif view == 'snapshot':
             assert snapshot is not None
             snapshot.render(stdscr, height, width)
+            curses.doupdate()
             key = stdscr.getch()
             list_rows = max(1, height - 5)
             result = snapshot.handle_key(key, list_rows)
             if result == 'timeline':
                 view = 'timeline'
+            elif result == 'quit':
+                break
+
+
+def main_compare(stdscr, data1: MemoryProfileData, data2: MemoryProfileData):
+    """Split-screen compare mode: two independent panes, vertical or horizontal split."""
+    curses.curs_set(0)
+    _init_colors()
+    stdscr.keypad(True)
+
+    datas     = [data1, data2]
+    timelines = [TimelineView(data1), TimelineView(data2)]
+    snapshots: list = [None, None]
+    views     = ['timeline', 'timeline']
+    active    = 0       # 0 = first pane, 1 = second pane
+    vertical  = True    # True = left/right split, False = top/bottom split
+
+    wins      = [None, None]
+    prev_state = (0, 0, True)   # (height, width, vertical)
+
+    while True:
+        height, width = stdscr.getmaxyx()
+
+        if vertical:
+            sep     = (width - 1) // 2
+            pane_h  = [height, height]
+            pane_w  = [sep, width - sep - 1]
+            pane_y  = [0, 0]
+            pane_x  = [0, sep + 1]
+        else:
+            sep     = (height - 1) // 2
+            pane_h  = [sep, height - sep - 1]
+            pane_w  = [width, width]
+            pane_y  = [0, sep + 1]
+            pane_x  = [0, 0]
+
+        # Recreate subwindows when terminal size or split direction changes
+        if (height, width, vertical) != prev_state:
+            for p in range(2):
+                wins[p] = curses.newwin(max(1, pane_h[p]), max(1, pane_w[p]),
+                                        pane_y[p], pane_x[p])
+                wins[p].keypad(True)
+            prev_state = (height, width, vertical)
+
+        # Draw separator on stdscr
+        stdscr.erase()
+        if vertical:
+            for row in range(height - 1):
+                safe_addch(stdscr, row, sep, '│', curses.A_DIM)
+            indicator = '◀' if active == 0 else '▶'
+            safe_addch(stdscr, height // 2, sep, indicator, curses.A_BOLD)
+        else:
+            for col in range(width):
+                safe_addch(stdscr, sep, col, '─', curses.A_DIM)
+            indicator = '▲' if active == 0 else '▼'
+            safe_addch(stdscr, sep, width // 2, indicator, curses.A_BOLD)
+        stdscr.noutrefresh()
+
+        # Render each pane into its subwindow
+        compare_hint = '   { or }: Switch pane   s: Toggle split direction'
+        for p in range(2):
+            win = wins[p]
+            win.bkgd(' ', curses.A_DIM if p != active else 0)
+            if views[p] == 'timeline':
+                timelines[p].render(win, pane_h[p], pane_w[p], extra_hint=compare_hint)
+            elif views[p] == 'snapshot' and snapshots[p] is not None:
+                snapshots[p].render(win, pane_h[p], pane_w[p], extra_hint=compare_hint)
+
+        curses.doupdate()
+        key = stdscr.getch()
+
+        # Global compare-mode keys (intercepted before pane dispatch)
+        active_snap = snapshots[active]
+        in_search = (views[active] == 'snapshot' and
+                     active_snap is not None and
+                     active_snap.search_mode)
+        if not in_search:
+            if key in (ord('{'), ord('}')):
+                active = 1 - active
+                continue
+            if key == ord('s'):
+                vertical = not vertical
+                prev_state = (0, 0, vertical)   # force window recreation
+                for tl in timelines:
+                    tl._auto_fit_done = False   # re-fit to new pane width
+                continue
+
+        # Dispatch key to the active pane
+        ph, pw = pane_h[active], pane_w[active]
+        if views[active] == 'timeline':
+            result = timelines[active].handle_key(key, pw - TimelineView.Y_AXIS_W - 1)
+            if result == 'snapshot':
+                snapshots[active] = SnapshotView(datas[active],
+                                                 timelines[active].current_time_us())
+                views[active] = 'snapshot'
+            elif result == 'quit':
+                break
+        elif views[active] == 'snapshot':
+            list_rows = max(1, ph - 5)
+            result = snapshots[active].handle_key(key, list_rows)
+            if result == 'timeline':
+                views[active] = 'timeline'
             elif result == 'quit':
                 break
 
@@ -1106,6 +1228,30 @@ def run():
         print(f'ptmem {__version__}')
         sys.exit(0)
 
+    # ── Compare mode: ptmem -c a.pkl b.pkl ────────────────────────────────────
+    if sys.argv[1] in ('-c', '--compare'):
+        if len(sys.argv) < 4:
+            print('Usage: ptmem -c <snapshot1.pkl> <snapshot2.pkl>')
+            sys.exit(1)
+        paths = [sys.argv[2], sys.argv[3]]
+        datas = []
+        for p in paths:
+            print(f'Loading {p} ...', end=' ', flush=True)
+            try:
+                d = MemoryProfileData(p)
+            except FileNotFoundError:
+                print(f'Error: file not found: {p}')
+                sys.exit(1)
+            except Exception as e:
+                print(f'Error loading snapshot: {e}')
+                sys.exit(1)
+            print('(from cache)' if d.from_cache else '(parsed, cache saved)')
+            datas.append(d)
+        print('Starting compare viewer...')
+        curses.wrapper(main_compare, datas[0], datas[1])
+        return
+
+    # ── Single mode ───────────────────────────────────────────────────────────
     path = sys.argv[1]
     print(f'Loading {path} ...', end=' ', flush=True)
 
