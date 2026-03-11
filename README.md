@@ -52,7 +52,7 @@ Fixing a memory regression often means comparing a before and after: "did this o
 
 
 
-TODO: currently you need to open two terminal tabs (such as using tmux) to compare, but this should be able to integrate into this tool and become a build-in feature.
+TODO: currently you need to open two terminal tabs (such as using tmux) to compare, but I should be able to integrate into this tool and become a build-in feature.
 
 ## Recording a snapshot
 
