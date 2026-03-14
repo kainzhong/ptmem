@@ -94,13 +94,25 @@ The `ptmem` command will then reflect any local changes you make to `src/ptmem/c
 ptmem <snapshot.pkl>
 ```
 
+Print a text summary without launching the interactive UI:
+
+```
+ptmem -s <snapshot.pkl>
+```
+
+Print all keyboard controls:
+
+```
+ptmem -k
+```
+
 To compare two snapshots side by side:
 
 ```
 ptmem -c <snapshot1.pkl> <snapshot2.pkl>
 ```
 
-The tool parses the snapshot (or loads the cache), prints a brief summary, then launches the interactive UI.
+The tool parses the snapshot (or loads the cache), then launches the interactive UI (or prints a summary if `-s` is given).
 
 ## Controls
 
@@ -127,7 +139,7 @@ The tool parses the snapshot (or loads the cache), prints a brief summary, then 
 | `→` | Move cursor to selected frame's first child (expands if needed) |
 | `←` | Move cursor to selected frame's parent |
 | `e` | Recursively expand selected frame and all descendants |
-| `c` | Collapse all frames |
+| `c` | Collapse selected frame and all descendants |
 | `r` | Jump cursor to the root of the current tree |
 | `f` | Focus: make selected frame the new root (resets indentation) |
 | `h` | Toggle hiding PyTorch internal and no-source frames |

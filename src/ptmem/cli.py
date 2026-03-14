@@ -4,19 +4,33 @@ PyTorch Memory Profiler - Interactive CLI Analyzer
 
 Usage:
     ptmem <snapshot.pkl>
-    ptmem -c, --compare <snapshot1.pkl> <snapshot2.pkl>
+    ptmem -s, --summary  <snapshot.pkl>
+    ptmem -c, --compare  <snapshot1.pkl> <snapshot2.pkl>
+    ptmem -k, --keymap
     ptmem -v, --version
     ptmem -h, --help
 
+Notes:
+    - Capture a snapshot by calling:
+        import torch
+        torch.cuda.memory._record_memory_history(max_entries=100000)
+        # ... run your model ...
+        torch.cuda.memory._dump_snapshot("snapshot.pkl")
+        torch.cuda.memory._record_memory_history(None)  # stop recording
+
+    - Run 'ptmem -k' to see all keyboard controls.
+"""
+
+_KEYMAP_HELP = """\
 Timeline View Controls:
     ← →       Step one column left / right
     b / f     Jump ±15 columns
     [ / ]     Jump ±¼ page left / right
-    + / -     Zoom in / out
+    + / -     Zoom in / out (cursor stays centred)
     ↑ ↓       Pan y-axis up / down
     r         Reset y-axis to full range
     Enter     Open snapshot detail at current cursor position
-    q         Quit
+    q / Q     Quit
 
 Snapshot / Detail View Controls:
     ↑ ↓       Navigate rows
@@ -25,24 +39,20 @@ Snapshot / Detail View Controls:
     →         Move to first child (expands if needed)
     ←         Move to parent
     e         Recursively expand selected frame and all descendants
-    c         Collapse all frames
+    c         Collapse selected frame and all descendants
     r         Jump to root of current tree
     f         Focus: make selected frame the new root (resets indentation)
+    h         Toggle hiding PyTorch internal / no-source frames
     /         Open search bar (type to filter by name or filename)
     n / N     Jump to next / previous search match
     Esc       Clear search highlights
     q         Unfocus (pop focus stack) / return to timeline view
+    Q         Quit immediately
 
 Compare Mode Controls (-c / --compare):
-    { or }    Switch focus between left and right pane
-    (all other keys operate on the focused pane as normal)
-
-Notes:
-    - Snapshot is captured by calling:
-        import torch
-        torch.cuda.memory._record_memory_history(max_entries=100000)
-        # ... run your model ...
-        torch.cuda.memory._dump_snapshot("snapshot.pkl")
+    { or }    Switch focus between pane 1 and pane 2
+    s         Toggle vertical / horizontal split
+    (all other keys operate on the focused pane as above)
 """
 
 import curses
@@ -918,11 +928,19 @@ class SnapshotView:
             self._rebuild()
 
         elif key == ord('c'):
-            # Collapse all: clear expanded_tree so nothing is expanded
-            self.expanded_tree = {}
-            self.cursor = 0
-            self.scroll = 0
-            self._rebuild()
+            # Collapse the selected frame and all its descendants
+            if 0 <= self.cursor < n:
+                depth, fd, sa, tb, is_exp, _, key_path = self._rows[self.cursor]
+                if fd is not None and key_path:
+                    tree = self.expanded_tree
+                    for k in key_path[:-1]:
+                        if k not in tree:
+                            tree = None
+                            break
+                        tree = tree[k]
+                    if tree is not None and key_path[-1] in tree:
+                        del tree[key_path[-1]]
+                    self._rebuild()
 
         elif key == curses.KEY_LEFT:
             # Go to parent: scan backward for first row with depth - 1
@@ -1071,7 +1089,7 @@ class SnapshotView:
             safe_addch(stdscr, LIST_START + int(pct_pos * (list_rows - 1)), width - 1, '█', curses.A_DIM)
 
         # Footer / search bar (two lines)
-        ctrl1 = ' ↑↓: Navigate   [ or ]: Prev/next sibling   →: First child   ←: Parent   Enter: Toggle   e: Expand all   c: Collapse all'
+        ctrl1 = ' ↑↓: Navigate   [ or ]: Prev/next sibling   →: First child   ←: Parent   Enter: Toggle   e: Expand subtree   c: Collapse subtree'
         hide_label = 'Show' if self.hide_internal else 'Hide'
         ctrl2 = f' r: Root   f: Focus   h: {hide_label} internal frames   /: Search   n/N: Next/prev match   Esc: Clear highlights   q: Unfocus/Back   Q: Quit'
         if self.search_mode:
@@ -1260,14 +1278,123 @@ def main_compare(stdscr, data1: MemoryProfileData, data2: MemoryProfileData):
 __version__ = '0.1.0'
 
 
+def print_summary(data: MemoryProfileData, path: str) -> None:
+    """Print a human-readable summary of a parsed snapshot to stdout."""
+    import statistics, math as _math
+
+    sep  = '─' * 52
+    sep2 = '═' * 52
+
+    def row(label, value):
+        print(f'  {label:<30} {value}')
+
+    print()
+    print(sep2)
+    print('  PyTorch Memory Snapshot Summary')
+    print(sep2)
+
+    # ── File ──────────────────────────────────────────────────────────────────
+    print()
+    print('  File')
+    print(sep)
+    file_size = os.path.getsize(path)
+    row('Path:', path)
+    row('File size:', fmt_bytes(file_size))
+    row('Cache:', '(from cache)' if data.from_cache else '(parsed fresh)')
+
+    # ── Recording ─────────────────────────────────────────────────────────────
+    print()
+    print('  Recording')
+    print(sep)
+    n_events = data.max_time + 1   # event indices 0 … max_time
+    wall_span = data.wall_max_us - data.wall_min_us
+    row('Events (alloc + free):', f'{n_events:,}')
+    row('Duration (wall clock):', fmt_time(wall_span))
+    devices = sorted({a.device for a in data.allocations})
+    row('CUDA devices:', ', '.join(f'device {d}' for d in devices) or '(none)')
+
+    # ── Memory ────────────────────────────────────────────────────────────────
+    print()
+    print('  Memory')
+    print(sep)
+    tm = data.timeline_memory
+    tus = data.timeline_times_us
+
+    mem_min = min(tm) if tm else 0
+    mem_max = data.max_memory
+    mem_final = tm[-1] if tm else 0
+
+    # Time-weighted average using wall-clock intervals between events
+    if len(tm) >= 2 and tus:
+        total_dur = tus[-1] - tus[0]
+        if total_dur > 0:
+            weighted = sum(tm[i] * (tus[i + 1] - tus[i]) for i in range(len(tm) - 1))
+            mem_avg = weighted / total_dur
+        else:
+            mem_avg = statistics.mean(tm)
+    else:
+        mem_avg = tm[0] if tm else 0
+
+    row('Before recording (initial):', fmt_bytes(data.initial_memory))
+    row('Minimum:', fmt_bytes(mem_min))
+    row('Average (time-weighted):', fmt_bytes(int(mem_avg)))
+    row('Peak:', fmt_bytes(mem_max))
+    row('Final (end of recording):', fmt_bytes(mem_final))
+
+    # ── Allocations ───────────────────────────────────────────────────────────
+    print()
+    print('  Allocations')
+    print(sep)
+    allocs = data.allocations
+    n_allocs = len(allocs)
+    n_live = sum(1 for a in allocs if a.time_free == _math.inf)
+    sizes = sorted(a.size for a in allocs)
+
+    row('Total tracked:', f'{n_allocs:,}')
+    row('Still live at end:', f'{n_live:,}')
+    if sizes:
+        row('Smallest:', fmt_bytes(sizes[0]))
+        row('Largest:', fmt_bytes(sizes[-1]))
+        row('Average size:', fmt_bytes(int(statistics.mean(sizes))))
+        row('Median size:', fmt_bytes(int(statistics.median(sizes))))
+        row('Total allocated (cumul.):', fmt_bytes(sum(sizes)))
+
+    print()
+    print(sep2)
+    print()
+
+
 def run():
     if len(sys.argv) < 2 or sys.argv[1] in ('-h', '--help'):
         print(__doc__)
         sys.exit(0)
 
+    if sys.argv[1] in ('-k', '--keymap'):
+        print(_KEYMAP_HELP)
+        sys.exit(0)
+
     if sys.argv[1] in ('-v', '--version'):
         print(f'ptmem {__version__}')
         sys.exit(0)
+
+    # ── Summary mode: ptmem -s snapshot.pkl ───────────────────────────────────
+    if sys.argv[1] in ('-s', '--summary'):
+        if len(sys.argv) < 3:
+            print('Usage: ptmem -s <snapshot.pkl>')
+            sys.exit(1)
+        path = sys.argv[2]
+        print(f'Loading {path} ...', end=' ', flush=True)
+        try:
+            data = MemoryProfileData(path)
+        except FileNotFoundError:
+            print(f'Error: file not found: {path}')
+            sys.exit(1)
+        except Exception as e:
+            print(f'Error loading snapshot: {e}')
+            sys.exit(1)
+        print('(from cache)' if data.from_cache else '(parsed, cache saved)')
+        print_summary(data, path)
+        return
 
     # ── Compare mode: ptmem -c a.pkl b.pkl ────────────────────────────────────
     if sys.argv[1] in ('-c', '--compare'):
