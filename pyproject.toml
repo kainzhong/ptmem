@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ptmem"
-version = "0.1.1"
+version = "0.1.2"
 description = "Interactive terminal UI for exploring PyTorch CUDA memory snapshots"
 readme = "README.md"
 license = { file = "LICENSE" }
