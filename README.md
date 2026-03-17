@@ -38,6 +38,11 @@ A common frustration with memory profiling is knowing that 18 GB is in use, but 
 
 Fixing a memory regression often means comparing a before and after: "did this optimization actually reduce peak memory?" With a browser-based tool you have to switch tabs and try to mentally align two separate charts. With a terminal tool you can open two snapshots in two terminal panes or tabs and scroll both to the same event index simultaneously, making differences immediately visible. Because the interface is purely text, it also works well inside a terminal multiplexer like `tmux` or `screen`, where you can arrange panes however you like.
 
+| Compare Timeline | Compare Snapshot Detail |
+| --- | --- |
+| <img width="1512" height="982" alt="comp_timeline" src="https://github.com/user-attachments/assets/4bc8d530-04d2-4bd7-9caa-b88652484b0a" /> | <img width="1512" height="982" alt="comp_detail" src="https://github.com/user-attachments/assets/401f9d19-7210-4e61-819e-6527f6f95708" /> |
+
+
 ### Search by function or module name
 
 Real models have deep call stacks. A single forward pass through a large transformer might involve dozens of nested function calls before reaching the actual tensor operation. Manually expanding the tree to find a specific layer or function can take a long time. Pressing `/` opens an incremental search bar: type any substring of a function name or filename and every matching frame is highlighted in the tree immediately. Press `n` / `N` to jump between matches. This lets you jump directly to, say, `attention` or `cross_entropy` or a specific file in your codebase without touching anything else.
